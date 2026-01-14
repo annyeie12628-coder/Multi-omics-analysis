@@ -1,0 +1,428 @@
+library(org.Hs.eg.db)
+library(stringr)
+library(BiocGenerics)
+
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#   install.packages("BiocManager")
+# BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+library(enrichplot)
+library(future)
+library(future.apply)
+
+#设置工作路径
+setwd("/Users/zhaobo/Desktop/TPR") 
+##创建结果文件夹
+dir.create("结果3")
+#导入数据
+exprSet <- read.csv("juzhen.csv",row.names = 1)
+
+##什么是GSEA?
+##判断某一组有特定意义的基因集合的表达模式更接近于哪一种生物状态
+##和GO分析有什么区别呢？
+##GO分析更加依赖差异基因。
+##而GSEA是从全体基因的表达矩阵出发，故能兼顾差异较小的基因
+
+#计算相关性，获取和目标基因关联性最强的基因群
+# 定义一个函数，用于计算目标基因与其他基因的相关性
+batch_cor <- function(gene){
+  y <- as.numeric(exprSet[gene,])
+  rownames <- rownames(exprSet)
+  do.call(rbind,future_lapply(rownames, function(x){
+    dd  <- cor.test(as.numeric(exprSet[x,]),y,type="spearman")##也可以换成pearson
+    # 返回一个数据框，包含目标基因、当前基因、相关系数和p值
+    data.frame(gene=gene,mRNAs=x,cor=dd$estimate,p.value=dd$p.value )
+  }))
+}
+
+##输入目标基因，并计算相关性
+dd <- batch_cor("TPR")
+##导出相关性结果
+write.csv(dd,"结果3/spearman-cor.csv")
+##提取基因集
+gene <- dd$mRNAs
+
+# 使用bitr函数将基因名转换为EntrezID格式（注：需要org.Hs.eg.db包）
+gene = bitr(gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+gene_df <- data.frame(cor=dd$cor,SYMBOL = dd$mRNAs)
+# 去除重复的基因符号
+gene <- dplyr::distinct(gene,SYMBOL,.keep_all=TRUE)
+# 创建一个基因列表，以相关系数为值，基因符号为名称
+geneList <- gene_df$cor
+names(geneList)=gene_df$SYMBOL
+# 按相关系数从高到低排序
+geneList=sort(geneList,decreasing = T)
+# 定义一个函数，用于绘制内部点图（dot plot）
+dotplot_internal <- function(object, x = "GeneRatio", color = "pvalue",
+                             showCategory=10, size=NULL, split = NULL,
+                             font.size=12, title = "", orderBy="x", decreasing=TRUE) {
+  # 匹配颜色参数
+  colorBy <- match.arg(color, c("pvalue", "p.adjust", "qvalue"))
+  # 处理x参数，确定绘图的横坐标
+  if (x == "geneRatio" || x == "GeneRatio") {
+    x <- "GeneRatio"
+    if (is.null(size))
+      size <- "Count"
+  } else if (x == "count" || x == "Count") {
+    x <- "Count"
+    if (is.null(size))
+      size <- "GeneRatio"
+  } else if (is(x, "formula")) {
+    x <- as.character(x)[2]
+    if (is.null(size))
+      size <- "Count"
+  } else {
+    if (is.null(size))
+      size  <- "Count"
+  }
+  df <- fortify(object, showCategory = showCategory, split=split)
+  # 确保orderBy参数正确
+  if (orderBy !=  'x' && !orderBy %in% colnames(df)) {
+    message('wrong orderBy parameter; set to default `orderBy = "x"`')
+    orderBy <- "x"
+  }
+  
+  if (orderBy == "x") {
+    df <- dplyr::mutate(df, x = eval(parse(text=x)))
+  }
+  # 根据排序结果调整描述因子的顺序
+  idx <- order(df[[orderBy]], decreasing = decreasing)
+  df$Description <- factor(df$Description, levels=rev(unique(df$Description[idx])))
+  ggplot(df, aes_string(x=x, y="Description", size=size, color=colorBy)) +
+    geom_point() +
+    scale_color_continuous(low="darkorange3", high="darkseagreen4", name = color, guide=guide_colorbar(reverse=TRUE)) +
+    ylab(NULL) + ggtitle(title) + DOSE::theme_dose(font.size) + scale_size(range=c(3, 8))
+  
+}
+
+
+##接下来就是进行GSEA分析了
+##下载并读取需要富集分析的基因集
+##https://www.gsea-msigdb.org/gsea/msigdb/index.jsp
+##也可以使用其他数据集，只需要整理出gmt格式即可
+
+##读取本地文件
+GO<-read.gmt("c5.go.v2023.2.Hs.symbols.gmt")
+
+GO <-GSEA(geneList,TERM2GENE = GO)
+
+library(ggplot2)
+library(enrichplot)
+
+##保存富集分析结果
+write.csv(data.frame(GO), file = "富集分析结果.csv", row.names = FALSE)
+
+#常规的，图上显示pvalue表
+p1=gseaplot2(GO,
+          geneSetID = 125,#展示的通路序号
+          title=GO$Description[125],
+          color="red", #线条颜色
+          base_size = 20, #基础字体的大小
+          subplots = 1:3, 
+          pvalue_table = T) # 显示p值
+p1
+ggsave("结果/p1.pdf",width = 12,height = 10)
+#多个通路一起展示
+p2=gseaplot2(GO,
+          geneSetID = 1:3,#这里展示前3个通路
+          subplots = 1:3,
+          ES_geom='line'
+)
+p2
+ggsave("结果/p2.TIFF",width = 12,height = 10)
+
+
+#排序后分别取GSEA结果的前5个
+num <- 5
+
+# 创建自定义颜色向量（按顺序对应前5个通路）
+custom_colors <- c("#6492c7", "#c5a027", "#b1701f", "#8CC2CA", "#a2ce92")
+
+# 修改 gseaplot2 调用，添加 color 参数
+p3 <- gseaplot2(
+  GO, 
+  geneSetID = rownames(GO@result)[head(order(GO@result$enrichmentScore), num)],  # 按ES排序取前5
+  color = custom_colors,  # 指定颜色向量
+  ES_geom = "line"  # 可选：设置富集曲线的几何类型
+)
+
+p3
+ggsave("结果/p33.TIFF", width = 8, height = 9)
+
+#######################
+# ... 前面的代码保持不变 ...
+
+#排序后分别取GSEA结果的前5个
+num <- 5
+custom_colors <- c("#6492c7", "#c5a027", "#b1701f", "#8CC2CA", "#a2ce92")
+
+# 修改 subplots 参数，移除第三个子图（ranked list metric）
+p3 <- gseaplot2(
+  GO,
+  geneSetID = rownames(GO@result)[head(order(GO@result$enrichmentScore), num)],
+  color = custom_colors,
+  subplots = 1:2,  # 仅显示前两个子图（ES曲线和热图）
+  ES_geom = "line"
+)
+
+p3
+ggsave("结果/p3.TIFF", width = 20, height = 9)
+
+# 输出结果
+##后5个
+p4=gseaplot2(GO, geneSetID = rownames(GO@result)[tail(order(GO@result$enrichmentScore),num)])
+p4
+ggsave("结果/p4.TIFF",width = 12,height = 10)
+#前5个和后5个一起展示
+num=5
+p5=gseaplot2(GO, geneSetID = rownames(GO@result)[c(head(order(GO@result$enrichmentScore),num),tail(order(GO@result$enrichmentScore),num))])
+p5
+ggsave("结果/p5.TIFF",width = 12,height = 12)
+
+
+#气泡图
+p6=dotplot(GO,color="pvalue")
+p6
+ggsave("结果/p6.TIFF",width = 10,height = 10)
+
+#分类气泡图
+
+p7=dotplot(GO,split=".sign")+facet_grid(~.sign)
+p7
+ggsave("结果/p7.TIFF",width = 10,height = 10)
+
+#山脊图
+p8=ridgeplot(GO,showCategory = 10,#展示前10个通路
+          fill = 'p.adjust',#可以选择 "pvalue", "p.adjust", "qvalue"
+          label_format = 25,#通路字符超过30就换行
+          core_enrichment = T)
+p8
+ggsave("结果/p8.TIFF",width = 10,height = 10)
+
+##同时展示多个图
+library(cowplot)
+pp <- lapply(1:3, function(i) {
+  anno <- GO[i, c("NES", "pvalue", "p.adjust")]
+  lab <- paste0(names(anno), "=",  round(anno, 3), collapse="\n")
+  
+  gsearank(GO, i, GO[i, 2]) + xlab(NULL) +ylab(NULL) +
+    annotate("text", 10000, GO[i, "enrichmentScore"] * .75, label = lab, hjust=0.5, vjust=0.5)
+})
+p9=plot_grid(plotlist=pp, ncol=1)
+p9
+ggsave("结果/p9.TIFF",width = 10,height = 10)
+library(org.Hs.eg.db)
+library(stringr)
+library(BiocGenerics)
+
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#   install.packages("BiocManager")
+# BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+library(enrichplot)
+library(future)
+library(future.apply)
+
+#设置工作路径
+setwd("/Users/zhaobo/Desktop/ERN1") 
+##创建结果文件夹
+dir.create("结果")
+#导入数据
+exprSet <- read.csv("juzhen.csv",row.names = 1)
+
+##什么是GSEA?
+##判断某一组有特定意义的基因集合的表达模式更接近于哪一种生物状态
+##和GO分析有什么区别呢？
+##GO分析更加依赖差异基因。
+##而GSEA是从全体基因的表达矩阵出发，故能兼顾差异较小的基因
+
+#计算相关性，获取和目标基因关联性最强的基因群
+# 定义一个函数，用于计算目标基因与其他基因的相关性
+batch_cor <- function(gene){
+  y <- as.numeric(exprSet[gene,])
+  rownames <- rownames(exprSet)
+  do.call(rbind,future_lapply(rownames, function(x){
+    dd  <- cor.test(as.numeric(exprSet[x,]),y,type="spearman")##也可以换成pearson
+    # 返回一个数据框，包含目标基因、当前基因、相关系数和p值
+    data.frame(gene=gene,mRNAs=x,cor=dd$estimate,p.value=dd$p.value )
+  }))
+}
+
+##输入目标基因，并计算相关性
+dd <- batch_cor("ERN1")
+##导出相关性结果
+write.csv(dd,"结果/spearman-cor.csv")
+##提取基因集
+gene <- dd$mRNAs
+
+# 使用bitr函数将基因名转换为EntrezID格式（注：需要org.Hs.eg.db包）
+gene = bitr(gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+gene_df <- data.frame(cor=dd$cor,SYMBOL = dd$mRNAs)
+# 去除重复的基因符号
+gene <- dplyr::distinct(gene,SYMBOL,.keep_all=TRUE)
+# 创建一个基因列表，以相关系数为值，基因符号为名称
+geneList <- gene_df$cor
+names(geneList)=gene_df$SYMBOL
+# 按相关系数从高到低排序
+geneList=sort(geneList,decreasing = T)
+# 定义一个函数，用于绘制内部点图（dot plot）
+dotplot_internal <- function(object, x = "GeneRatio", color = "pvalue",
+                             showCategory=10, size=NULL, split = NULL,
+                             font.size=12, title = "", orderBy="x", decreasing=TRUE) {
+  # 匹配颜色参数
+  colorBy <- match.arg(color, c("pvalue", "p.adjust", "qvalue"))
+  # 处理x参数，确定绘图的横坐标
+  if (x == "geneRatio" || x == "GeneRatio") {
+    x <- "GeneRatio"
+    if (is.null(size))
+      size <- "Count"
+  } else if (x == "count" || x == "Count") {
+    x <- "Count"
+    if (is.null(size))
+      size <- "GeneRatio"
+  } else if (is(x, "formula")) {
+    x <- as.character(x)[2]
+    if (is.null(size))
+      size <- "Count"
+  } else {
+    if (is.null(size))
+      size  <- "Count"
+  }
+  df <- fortify(object, showCategory = showCategory, split=split)
+  # 确保orderBy参数正确
+  if (orderBy !=  'x' && !orderBy %in% colnames(df)) {
+    message('wrong orderBy parameter; set to default `orderBy = "x"`')
+    orderBy <- "x"
+  }
+  
+  if (orderBy == "x") {
+    df <- dplyr::mutate(df, x = eval(parse(text=x)))
+  }
+  # 根据排序结果调整描述因子的顺序
+  idx <- order(df[[orderBy]], decreasing = decreasing)
+  df$Description <- factor(df$Description, levels=rev(unique(df$Description[idx])))
+  ggplot(df, aes_string(x=x, y="Description", size=size, color=colorBy)) +
+    geom_point() +
+    scale_color_continuous(low="darkorange3", high="darkseagreen4", name = color, guide=guide_colorbar(reverse=TRUE)) +
+    ylab(NULL) + ggtitle(title) + DOSE::theme_dose(font.size) + scale_size(range=c(3, 8))
+  
+}
+
+
+##接下来就是进行GSEA分析了
+##下载并读取需要富集分析的基因集
+##https://www.gsea-msigdb.org/gsea/msigdb/index.jsp
+##也可以使用其他数据集，只需要整理出gmt格式即可
+
+##读取本地文件
+GO<-read.gmt("c5.go.v2023.2.Hs.symbols.gmt")
+
+GO <-GSEA(geneList,TERM2GENE = GO)
+
+library(ggplot2)
+library(enrichplot)
+
+##保存富集分析结果
+write.csv(data.frame(GO), file = "富集分析结果.csv", row.names = FALSE)
+
+#常规的，图上显示pvalue表
+p1=gseaplot2(GO,
+          geneSetID = 125,#展示的通路序号
+          title=GO$Description[125],
+          color="red", #线条颜色
+          base_size = 20, #基础字体的大小
+          subplots = 1:3, 
+          pvalue_table = T) # 显示p值
+p1
+ggsave("结果/p1.pdf",width = 12,height = 10)
+#多个通路一起展示
+p2=gseaplot2(GO,
+          geneSetID = 1:3,#这里展示前3个通路
+          subplots = 1:3,
+          ES_geom='line'
+)
+p2
+ggsave("结果/p2.pdf",width = 12,height = 10)
+
+
+#排序后分别取GSEA结果的前5个
+num <- 5
+
+# 创建自定义颜色向量（按顺序对应前5个通路）
+custom_colors <- c("#6492c7", "#c5a027", "#b1701f", "#8CC2CA", "#a2ce92")
+
+# 修改 gseaplot2 调用，添加 color 参数
+p3 <- gseaplot2(
+  GO, 
+  geneSetID = rownames(GO@result)[head(order(GO@result$enrichmentScore), num)],  # 按ES排序取前5
+  color = custom_colors,  # 指定颜色向量
+  ES_geom = "line"  # 可选：设置富集曲线的几何类型
+)
+
+p3
+ggsave("结果/p3.pdf", width = 8, height = 9)
+
+#######################
+# ... 前面的代码保持不变 ...
+
+#排序后分别取GSEA结果的前5个
+num <- 5
+custom_colors <- c("#6492c7", "#c5a027", "#b1701f", "#8CC2CA", "#a2ce92")
+
+# 修改 subplots 参数，移除第三个子图（ranked list metric）
+p3 <- gseaplot2(
+  GO,
+  geneSetID = rownames(GO@result)[head(order(GO@result$enrichmentScore), num)],
+  color = custom_colors,
+  subplots = 1:2,  # 仅显示前两个子图（ES曲线和热图）
+  ES_geom = "line"
+)
+
+p3
+ggsave("结果/p3.TIFF", width = 20, height = 9)
+
+# 输出结果
+##后5个
+p4=gseaplot2(GO, geneSetID = rownames(GO@result)[tail(order(GO@result$enrichmentScore),num)])
+p4
+ggsave("结果/p4.TIFF",width = 12,height = 10)
+#前5个和后5个一起展示
+num=5
+p5=gseaplot2(GO, geneSetID = rownames(GO@result)[c(head(order(GO@result$enrichmentScore),num),tail(order(GO@result$enrichmentScore),num))])
+p5
+ggsave("结果/p5.TIFF",width = 12,height = 12)
+
+
+#气泡图
+p6=dotplot(GO,color="pvalue")
+p6
+ggsave("结果/p6.TIFF",width = 10,height = 10)
+
+#分类气泡图
+
+p7=dotplot(GO,split=".sign")+facet_grid(~.sign)
+p7
+ggsave("结果/p7.TIFF",width = 10,height = 10)
+
+#山脊图
+p8=ridgeplot(GO,showCategory = 10,#展示前10个通路
+          fill = 'p.adjust',#可以选择 "pvalue", "p.adjust", "qvalue"
+          label_format = 25,#通路字符超过30就换行
+          core_enrichment = T)
+p8
+ggsave("结果/p8.TIFF",width = 10,height = 10)
+
+##同时展示多个图
+library(cowplot)
+pp <- lapply(1:3, function(i) {
+  anno <- GO[i, c("NES", "pvalue", "p.adjust")]
+  lab <- paste0(names(anno), "=",  round(anno, 3), collapse="\n")
+  
+  gsearank(GO, i, GO[i, 2]) + xlab(NULL) +ylab(NULL) +
+    annotate("text", 10000, GO[i, "enrichmentScore"] * .75, label = lab, hjust=0.5, vjust=0.5)
+})
+p9=plot_grid(plotlist=pp, ncol=1)
+p9
+ggsave("结果/p9.TIFF",width = 10,height = 10)
+
+
