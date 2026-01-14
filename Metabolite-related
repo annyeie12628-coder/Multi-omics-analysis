@@ -1,0 +1,261 @@
+# 设置工作目录（可选）
+setwd("/Users/zhaobo/Desktop/五个代谢物的ROC")
+
+# 加载必要的库
+library(pROC)
+
+# 读取数据（请确保 CSV 文件路径正确，指定编码）
+data <- read.csv("第三个.csv", fileEncoding = "UTF-8")
+
+# 检查列名，确保列名正确
+print(colnames(data))
+
+# 选择一个代谢物和标签列（使用列名加上 `data$` 访问）
+metabolite <- data$`代谢物浓度`  # 代谢物浓度（请确保列名与数据表一致）
+labels <- data$`标签`  # 0 = 健康, 1 = 脓毒症
+
+# 确保数据类型正确
+labels <- as.numeric(labels)  # 诊断标签应为数值型
+# 检查标签列的唯一值
+unique(data$`标签`)
+# 计算 ROC 曲线
+roc_curve <- roc(labels, metabolite)
+
+# 显示 AUC 值
+auc_value <- auc(roc_curve)
+#########33######################################3
+# 设置输出 PDF 文件
+pdf("Hernandezine.pdf", width=6, height=6)  # 指定文件名和尺寸
+
+# 绘制 ROC 曲线，修改颜色
+plot(roc_curve, col="#B3CDE3", lwd=2, main="ROC Curve for Metabolite", legacy.axes=TRUE)
+
+# 解决 AUC 填充区域问题（确保完整填充）##########这部分有问题可以不用运行曲线下面积
+polygon(
+  x = c(1 - roc_curve$specificities, 1), 
+  y = c(roc_curve$sensitivities, 0), 
+  col = "#bdd6eb4c", border = NA
+)
+
+# 添加 AUC 值文本到图像上
+text(0.5, 0.2, paste("AUC =", round(auc_value, 3)), col="black", cex=1.2, font=2)#这里的3是小数点后保留几位
+
+# 关闭 PDF 输出
+dev.off()
+
+# 设置工作目录（可选）
+setwd("/Users/zhaobo/Desktop/特征重要性")
+# 加载必要的包
+library(pROC)
+library(MASS)
+
+# 读取数据
+data <- read.csv("联合诊断模型.csv")
+colnames(data)
+# 选择用于建模的变量
+features <- data[, c("X22.oxotricosanoic.acid", "Calicoferol.E", "Hernandezine","Bardoxolone","X1.tetracosanoyl.sn.glycero.3.phosphocholine", "TPR", "ERN1")]
+labels <- data$`诊断标签`
+
+# 训练 Logistic 回归模型
+model <- glm(labels ~ ., data = data.frame(features, labels), family = binomial)
+
+# 预测概率
+predicted_prob <- predict(model, newdata = data.frame(features), type="response")
+
+# 计算 ROC 曲线
+roc_curve <- roc(labels, predicted_prob)
+
+# 绘制 ROC 曲线
+plot(roc_curve, col="blue", lwd=2, main="ROC Curve for Gene-Metabolite Joint Diagnostic Model")
+
+# 显示 AUC
+auc(roc_curve)
+#####################################################
+# 设置工作目录（可选）
+setwd("/Users/zhaobo/Desktop/特征重要性")
+
+# 加载必要的包
+library(pROC)
+library(MASS)
+
+# 读取数据
+data <- read.csv("联合诊断模型.csv")
+
+# 选择用于建模的变量
+features <- data[, c("X22.oxotricosanoic.acid", "Calicoferol.E", "Hernandezine","Bardoxolone","X1.tetracosanoyl.sn.glycero.3.phosphocholine", "TPR", "ERN1")]
+labels <- data$`诊断标签`
+# 逻辑回归模型
+model <- glm(labels ~ ., data = data.frame(features, labels), family = binomial)
+
+# 预测概率
+predictions <- predict(model, type = "response")
+
+# 计算 ROC 曲线
+roc_curve <- roc(labels, predictions)
+
+# 设置输出 PDF 文件
+pdf("ROC_Curve_Fixed.pdf", width=6, height=6)  # 指定文件名和尺寸
+
+# 绘制 ROC 曲线，颜色改为 #B3CDE3
+plot(roc_curve, col="#B3CDE3", lwd=2, main="ROC curves for the joint model", legacy.axes=TRUE)
+
+# 关闭 PDF 输出
+dev.off()
+
+# 设置工作目录（可选）
+setwd("/Users/zhaobo/Desktop/联合诊断模型")
+# 加载必要的R包
+library(caret)
+library(pROC)
+library(randomForest)
+library(e1071)
+
+# 读取数据
+data <- read.csv("联合诊断模型.csv")  
+
+# 提取特征和标签
+X <- data[, !colnames(data) %in% c("样本编号", "诊断标签")]
+y <- as.factor(data$诊断标签)
+
+# 数据标准化
+X_scaled <- scale(X)
+
+# 划分训练集和测试集（70% 训练，30% 测试）
+set.seed(42)
+trainIndex <- createDataPartition(y, p = 0.7, list = FALSE)
+X_train <- X_scaled[trainIndex, ]
+X_test <- X_scaled[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test <- y[-trainIndex]
+
+# 训练逻辑回归模型
+model_lr <- glm(y_train ~ ., data = as.data.frame(X_train), family = binomial)
+prob_lr <- predict(model_lr, newdata = as.data.frame(X_test), type = "response")
+
+# 训练随机森林模型
+model_rf <- randomForest(x = X_train, y = y_train, ntree = 100)
+prob_rf <- predict(model_rf, X_test, type = "prob")[, 2]
+
+# 训练支持向量机模型
+model_svm <- svm(X_train, y_train, probability = TRUE)
+prob_svm <- attr(predict(model_svm, X_test, probability = TRUE), "probabilities")[, 2]
+
+# 计算AUC并绘制ROC曲线
+roc_lr <- roc(y_test, prob_lr)
+roc_rf <- roc(y_test, prob_rf)
+roc_svm <- roc(y_test, prob_svm)
+# 创建 PDF 和 TIFF 文件
+pdf("ROC_Curve.pdf", width = 6, height = 6)
+tiff("ROC_Curve.tiff", width = 6, height = 6, units = "in", res = 300)
+
+######################################
+# 绘制 ROC 曲线
+plot(roc_lr, col = "#994F88", main = "ROC Curve of Machine Learning Models",
+     lwd = 1, lty = 1)  # 逻辑回归
+lines(roc_rf, col = "#A0CBE8", lwd = 1, lty = 2)  # 随机森林
+lines(roc_svm, col = "#86BCB6", lwd = 1, lty = 3)  # SVM
+
+# 添加图例
+legend("bottomright", legend = c("Logistic Regression", "Random Forest", "SVM"),
+       col = c("#994F88", "#A0CBE8", "#86BCB6"), lwd = 0.75, lty = c(1, 2, 3))
+
+# 关闭图形设备
+dev.off()
+
+##############################################################LASSO 变量选择图##############
+# 加载必要的 R 包
+library(glmnet)
+library(ggplot2)
+
+# 进行 LASSO 回归（10 折交叉验证）
+set.seed(42)
+lasso_model <- cv.glmnet(as.matrix(X_train), y_train, alpha = 1, family = "binomial")
+
+# 获取最佳 lambda 值
+best_lambda <- lasso_model$lambda.min
+
+# 确保目标变量是数值型（0/1）
+y_train_numeric <- as.numeric(y_train) - 1  # 将 factor 转换为 0/1 编码
+
+# 进行 LASSO 回归（10 折交叉验证）
+set.seed(42)
+lasso_model <- cv.glmnet(as.matrix(X_train), y_train_numeric, alpha = 1, family = "binomial")
+
+# 获取最佳 lambda 值
+best_lambda <- lasso_model$lambda.min
+
+# 训练最终的 LASSO 模型
+lasso_final <- glmnet(as.matrix(X_train), y_train_numeric, alpha = 1, lambda = best_lambda)
+
+# 提取 LASSO 系数并转换为数据框
+lasso_coef <- as.matrix(coef(lasso_final))
+coef_df <- data.frame(
+  Feature = rownames(lasso_coef),
+  Coefficient = lasso_coef[, 1]
+)
+
+# **去除截距项 (Intercept)**
+coef_df <- coef_df[coef_df$Feature != "(Intercept)", ]
+
+# **按绝对值排序**
+coef_df <- coef_df[order(abs(coef_df$Coefficient), decreasing = TRUE), ]
+
+# **绘制 LASSO 变量选择的可视化图**
+lasso_plot <- ggplot(coef_df, aes(x = reorder(Feature, Coefficient), y = Coefficient)) +
+  geom_bar(stat = "identity", fill = "#BDB9D5") +  # 使用柔和的紫色
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "LASSO Feature Selection", x = "Coefficient Value", y = "Features") +
+  theme(axis.text.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"))
+
+# **显示图像**
+print(lasso_plot)
+
+# **保存图片**
+ggsave("LASSO_Feature_Selection.pdf", plot = lasso_plot, width = 8, height = 6, dpi = 300)  # PDF
+ggsave("LASSO_Feature_Selection.tiff", plot = lasso_plot, width = 8, height = 6, dpi = 300, device = "tiff")  # TIFF
+
+####################################################################################
+# 加载必要的 R 包
+library(randomForest)
+
+# 仅使用 LASSO 筛选出的变量训练随机森林
+selected_features <- coef_df$Feature  # 仅使用 LASSO 选出的特征
+X_selected <- X_train[, colnames(X_train) %in% selected_features]
+X_test_selected <- X_test[, colnames(X_test) %in% selected_features]
+
+# 训练随机森林模型
+set.seed(42)
+model_rf_selected <- randomForest(x = X_selected, y = y_train, ntree = 100)
+
+# 提取特征重要性并转换为数据框
+importance_df <- as.data.frame(importance(model_rf_selected))
+colnames(importance_df) <- c("MeanDecreaseGini")  # 统一列名
+importance_df$Feature <- rownames(importance_df)
+
+# **按特征重要性排序**
+importance_df <- importance_df[order(importance_df$MeanDecreaseGini, decreasing = TRUE), ]
+
+# **确保因子顺序正确**
+importance_df$Feature <- factor(importance_df$Feature, levels = importance_df$Feature)
+
+# **绘制特征重要性图**
+rf_plot <- ggplot(importance_df, aes(x = MeanDecreaseGini, y = Feature, fill = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", show.legend = FALSE, alpha = 0.8) +  # 设置透明度
+  scale_fill_gradient(low = "#A3C1DA", high = "#96caac") +  # 从浅蓝到深蓝
+  theme_minimal() +
+  labs(title = "Feature Importance Analysis (Random Forest)", x = "Feature Importance", y = "Features") +
+  theme(axis.text.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"))
+
+# **显示图像**
+print(rf_plot)
+
+# **保存图片**
+ggsave("Feature_Importance_RF.pdf", plot = rf_plot, width = 11, height = 6, dpi = 300)  # PDF
+ggsave("Feature_Importance_RF.tiff", plot = rf_plot, width = 11, height = 6, dpi = 300, device = "tiff")  # TIFF
+
+
