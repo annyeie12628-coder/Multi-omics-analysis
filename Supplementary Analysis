@@ -1,0 +1,300 @@
+# 加载必要的包
+library(pROC)
+library(caret)
+library(ggplot2)
+library(pROC)
+library(boot)
+library(plotROC)
+library(reshape2)
+library(parallel)
+
+# 设置随机种子保证可重复性
+set.seed(123)
+
+# 1. 标签置换检验 (Permutation Test)
+permutation_test <- function(model, test_data, test_labels, n_permutations = 1000) {
+  # 计算观察到的AUC
+  predictions <- predict(model, test_data, type = "prob")[, 2]
+  observed_auc <- as.numeric(roc(test_labels, predictions)$auc)
+  
+  # 进行置换检验
+  permuted_aucs <- numeric(n_permutations)
+  
+  for (i in 1:n_permutations) {
+    # 随机置换标签
+    permuted_labels <- sample(test_labels)
+    
+    # 计算置换后的AUC
+    permuted_aucs[i] <- as.numeric(roc(permuted_labels, predictions)$auc)
+  }
+  
+  # 计算p值
+  p_value <- mean(permuted_aucs >= observed_auc)
+  
+  # 绘制零分布图
+  plot_data <- data.frame(Permuted_AUC = permuted_aucs)
+  p <- ggplot(plot_data, aes(x = Permuted_AUC)) +
+    geom_histogram(fill = "lightblue", alpha = 0.7, bins = 30) +
+    geom_vline(xintercept = observed_auc, color = "red", linetype = "dashed", size = 1) +
+    labs(title = "Permutation Test: AUC Null Distribution",
+         x = "AUC", y = "Frequency",
+         subtitle = paste("Observed AUC =", round(observed_auc, 3),
+                         "P-value =", round(p_value, 4))) +
+    theme_minimal()
+  
+  return(list(
+    observed_auc = observed_auc,
+    p_value = p_value,
+    permuted_aucs = permuted_aucs,
+    plot = p
+  ))
+}
+
+# 2. Brier Score和Bootstrap校准曲线
+calibration_assessment <- function(model, test_data, test_labels, n_bootstrap = 1000) {
+  # 计算预测概率
+  predictions <- predict(model, test_data, type = "prob")[, 2]
+  
+  # 计算Brier Score
+  brier_score <- mean((predictions - as.numeric(as.factor(test_labels)) + 1)^2)
+  
+  # Bootstrap校准曲线
+  n <- length(test_labels)
+  boot_calibration <- matrix(NA, nrow = n_bootstrap, ncol = 10)
+  
+  for (b in 1:n_bootstrap) {
+    # Bootstrap重抽样
+    idx <- sample(1:n, n, replace = TRUE)
+    boot_pred <- predictions[idx]
+    boot_labels <- as.numeric(as.factor(test_labels[idx])) - 1
+    
+    # 计算校准曲线
+    cal_data <- data.frame(pred = boot_pred, label = boot_labels)
+    cal_data$bin <- cut(cal_data$pred, breaks = seq(0, 1, 0.1), include.lowest = TRUE)
+    
+    cal_agg <- aggregate(cbind(label, pred) ~ bin, data = cal_data,
+                         FUN = function(x) c(mean = mean(x), n = length(x)))
+    
+    boot_calibration[b, ] <- cal_agg$label[, "mean"]
+  }
+  
+  # 计算置信区间
+  ci_lower <- apply(boot_calibration, 2, quantile, probs = 0.025)
+  ci_upper <- apply(boot_calibration, 2, quantile, probs = 0.975)
+  ci_mean <- apply(boot_calibration, 2, mean)
+  
+  # 创建校准曲线数据框
+  cal_curve_data <- data.frame(
+    bin = seq(0.05, 0.95, 0.1),
+    observed = ci_mean,
+    lower = ci_lower,
+    upper = ci_upper,
+    expected = seq(0.05, 0.95, 0.1)
+  )
+  
+  # 绘制校准曲线
+  p <- ggplot(cal_curve_data, aes(x = expected, y = observed)) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, fill = "blue") +
+    geom_line(color = "blue", size = 1) +
+    geom_point(color = "blue", size = 2) +
+    labs(title = "Calibration Curve with Bootstrap Confidence Intervals",
+         x = "Predicted Probability",
+         y = "Observed Proportion",
+         subtitle = paste("Brier Score =", round(brier_score, 4))) +
+    theme_minimal() +
+    coord_equal(ratio = 1)
+  
+  return(list(
+    brier_score = brier_score,
+    calibration_curve = cal_curve_data,
+    plot = p
+  ))
+}
+
+# 3. 重复分层随机划分
+repeated_stratified_split <- function(data, labels, n_repeats = 200, 
+                                      train_ratio = 0.7, n_cores = detectCores() - 1) {
+  
+  # 并行计算设置
+  cl <- makeCluster(n_cores)
+  clusterExport(cl, c("data", "labels", "train_ratio"))
+  clusterEvalQ(cl, {
+    library(caret)
+    library(pROC)
+  })
+  
+  # 并行重复划分
+  results <- parLapply(cl, 1:n_repeats, function(i) {
+    # 分层随机划分
+    train_idx <- createDataPartition(labels, p = train_ratio, list = FALSE)
+    
+    train_data <- data[train_idx, ]
+    test_data <- data[-train_idx, ]
+    train_labels <- labels[train_idx]
+    test_labels <- labels[-train_idx]
+    
+    # 这里应该插入您的建模代码
+    # 示例：使用glm模型
+    model <- glm(as.formula(paste("label ~", paste(colnames(data), collapse = "+"))),
+                 data = data.frame(train_data, label = train_labels),
+                 family = binomial())
+    
+    # 预测
+    predictions <- predict(model, newdata = data.frame(test_data), type = "response")
+    
+    # 计算性能指标
+    auc_value <- as.numeric(roc(test_labels, predictions)$auc)
+    accuracy <- mean((predictions > 0.5) == test_labels)
+    
+    return(c(auc = auc_value, accuracy = accuracy))
+  })
+  
+  stopCluster(cl)
+  
+  # 整理结果
+  results_df <- do.call(rbind, results)
+  
+  # 汇总统计
+  summary_stats <- data.frame(
+    Metric = c("AUC", "Accuracy"),
+    Mean = c(mean(results_df[, "auc"]), mean(results_df[, "accuracy"])),
+    SD = c(sd(results_df[, "auc"]), sd(results_df[, "accuracy"])),
+    Median = c(median(results_df[, "auc"]), median(results_df[, "accuracy"])),
+    IQR = c(IQR(results_df[, "auc"]), IQR(results_df[, "accuracy"])),
+    Min = c(min(results_df[, "auc"]), min(results_df[, "accuracy"])),
+    Max = c(max(results_df[, "auc"]), max(results_df[, "accuracy"]))
+  )
+  
+  # 绘制结果分布
+  plot_data <- melt(results_df)
+  colnames(plot_data) <- c("Repeat", "Metric", "Value")
+  
+  p <- ggplot(plot_data, aes(x = Metric, y = Value, fill = Metric)) +
+    geom_boxplot(alpha = 0.7) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "red") +
+    labs(title = "Performance Stability Across Repeated Splits",
+         subtitle = paste(n_repeats, "repeats of 70/30 stratified splitting"),
+         y = "Performance Metric") +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  return(list(
+    results = results_df,
+    summary = summary_stats,
+    plot = p
+  ))
+}
+
+# 4. 不同代谢物筛选阈值和预处理策略
+metabolite_screening_comparison <- function(data, labels, 
+                                            vip_thresholds = c(1.0, 1.5, 2.0),
+                                            preprocessing_methods = c("none", "log", "pareto")) {
+  
+  results_list <- list()
+  
+  for (vip_thresh in vip_thresholds) {
+    for (preprocess in preprocessing_methods) {
+      # 根据VIP阈值筛选代谢物
+      # 这里假设您有VIP分数的向量
+      # vip_scores <- calculate_vip(data, labels)  # 需要自定义VIP计算函数
+      # selected_features <- which(vip_scores > vip_thresh)
+      
+      # 预处理数据
+      processed_data <- switch(preprocess,
+                               "none" = data,
+                               "log" = log(data + 1),
+                               "pareto" = scale(data, center = TRUE, scale = sqrt(apply(data, 2, sd))))
+      
+      # 划分训练测试集
+      train_idx <- createDataPartition(labels, p = 0.7, list = FALSE)
+      train_data <- processed_data[train_idx, ]
+      test_data <- processed_data[-train_idx, ]
+      train_labels <- labels[train_idx]
+      test_labels <- labels[-train_idx]
+      
+      # 建模和评估（示例使用glm）
+      model <- glm(as.formula(paste("label ~", paste(colnames(train_data), collapse = "+"))),
+                   data = data.frame(train_data, label = train_labels),
+                   family = binomial())
+      
+      predictions <- predict(model, newdata = data.frame(test_data), type = "response")
+      
+      auc_value <- as.numeric(roc(test_labels, predictions)$auc)
+      accuracy <- mean((predictions > 0.5) == test_labels)
+      
+      # 存储结果
+      results_list[[paste0("VIP_", vip_thresh, "_", preprocess)]] <- c(
+        VIP_threshold = vip_thresh,
+        Preprocessing = preprocess,
+        AUC = auc_value,
+        Accuracy = accuracy
+      )
+    }
+  }
+  
+  # 整理结果
+  results_df <- do.call(rbind, results_list)
+  results_df <- as.data.frame(results_df)
+  
+  # 绘制比较图
+  plot_data <- results_df
+  plot_data$Condition <- paste0("VIP>", plot_data$VIP_threshold, "_", plot_data$Preprocessing)
+  
+  p <- ggplot(plot_data, aes(x = Condition)) +
+    geom_point(aes(y = AUC, color = "AUC"), size = 3) +
+    geom_point(aes(y = Accuracy, color = "Accuracy"), size = 3) +
+    labs(title = "Performance Across Different Screening Thresholds and Preprocessing",
+         y = "Performance Metric",
+         color = "Metric") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  return(list(
+    comparison_results = results_df,
+    plot = p
+  ))
+}
+
+# 主函数：执行所有稳健性诊断
+run_robustness_diagnostics <- function(data, labels, model) {
+  cat("Running Robustness Diagnostics...\n")
+  
+  # 划分训练测试集
+  train_idx <- createDataPartition(labels, p = 0.7, list = FALSE)
+  train_data <- data[train_idx, ]
+  test_data <- data[-train_idx, ]
+  train_labels <- labels[train_idx]
+  test_labels <- labels[-train_idx]
+  
+  # 1. 置换检验
+  cat("1. Performing permutation test...\n")
+  perm_results <- permutation_test(model, test_data, test_labels)
+  print(perm_results$plot)
+  
+  # 2. 校准评估
+  cat("2. Assessing calibration...\n")
+  cal_results <- calibration_assessment(model, test_data, test_labels)
+  print(cal_results$plot)
+  
+  # 3. 重复分层划分
+  cat("3. Running repeated stratified splits...\n")
+  split_results <- repeated_stratified_split(data, labels)
+  print(split_results$plot)
+  
+  # 4. 代谢物筛选比较
+  cat("4. Comparing metabolite screening thresholds...\n")
+  screening_results <- metabolite_screening_comparison(data, labels)
+  print(screening_results$plot)
+  
+  # 返回所有结果
+  return(list(
+    permutation_test = perm_results,
+    calibration = cal_results,
+    repeated_splits = split_results,
+    screening_comparison = screening_results
+  ))
+}
+
+
+# results <- run_robustness_diagnostics(data, labels, trained_model)
