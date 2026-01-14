@@ -1,0 +1,169 @@
+library(tidyverse)    
+library(broom)
+library(glmnet)
+setwd("/Users/zhaobo/Desktop/lsso") 
+
+
+# 读取表达矩阵和分类文件，指定第一列作为行名
+x<-read.csv("juzhen.csv",row.names = 1)
+y<-read.csv("fenlei.csv",row.names = 1)
+
+# 将读取的数据转换为矩阵形式，以便于后续的模型计算
+x=as.matrix(x)
+y=as.matrix(y)
+
+# 设置随机种子以确保结果的可重复性
+set.seed(66666)
+#?cv.glmnet
+
+# 使用交叉验证方法选择最佳LASSO模型参数
+# type.measure = "mse" 表示使用均方误差作为模型评估指标
+# nfolds = 5 表示5折交叉验证
+# alpha = 1 表示LASSO回归（如果alpha = 0，表示Ridge回归）
+cvfit=cv.glmnet(x,y,type.measure = "mse",nfolds = 5,alpha=1)
+
+# 绘制交叉验证结果图，展示不同lambda值对应的模型性能
+plot(cvfit)
+
+
+# 查看交叉验证中计算出的最小lambda值（即对应最优模型）
+cvfit$lambda.min
+
+c(cvfit$lambda.min, cvfit$lambda.1se)
+
+# 重新拟合LASSO模型，使用较大范围的lambda值
+# family = "binomial" 表示因变量是二元分类变量
+lasso<-glmnet(x,y,family="binomial",alpha=1,nlambda = 100)#family="binomial" 适用于二元离散因变量（binary）
+
+# 绘制LASSO回归路径图，展示不同lambda值下系数的变化情况
+plot(lasso,xvar="lambda",label=F) #lambda参数
+
+
+# 提取对应最小lambda值下的模型系数
+coef <- coef(lasso, s = cvfit$lambda.min)
+# 找出非零系数对应的索引，筛选出有实际作用的基因
+index <- which(coef != 0)
+actCoef <- coef[index]
+# 提取非零系数对应的基因名称及其系数值
+lassoGene=row.names(coef)[index]
+geneCoef=cbind(Gene=lassoGene, Coef=actCoef)
+# 将提取的核心基因及其系数保存到CSV文件中
+write.csv(geneCoef,"核心基因系数.csv")
+
+
+##设置工作路径
+setwd("/Users/zhaobo/Desktop/ssvm") 
+##安装相应的包
+library(tidyverse)
+library(glmnet)
+source('msvmRFE.R')   #网盘自己下载，放在自己的工作路径下
+library(VennDiagram)
+library(sigFeature)
+library(e1071)
+library(caret)
+library(randomForest)
+
+
+##读取文件
+input <- read.csv("sepsis.csv",row.names = 1)
+
+##下面开始正式分析
+###采用五折交叉验证
+svmRFE(input, k = 5, halve.above = 100)
+
+nfold = 5
+nrows = nrow(input)
+folds = rep(1:nfold, len=nrows)[sample(nrows)]
+folds = lapply(1:nfold, function(x) which(folds == x))
+results = lapply(folds, svmRFE.wrap, input, k=5, halve.above=100)
+
+# #查看主要变量
+top.features = WriteFeatures(results, input, save=F)
+head(top.features)
+
+#把SVM-REF找到的特征保存到文件
+write.csv(top.features,"feature_svm2.csv")
+
+##变量越多，实际越长
+##只用20变量个简单示范一下，大概运行2分钟
+
+featsweep = lapply(1:14, FeatSweep.wrap, results, input) 
+
+save(featsweep,file = "result.RData")
+load("result.RData")
+#画图
+no.info = min(prop.table(table(input[,1])))
+errors = sapply(featsweep, function(x) ifelse(is.null(x), NA, x$error))
+
+#绘制错误率图形
+PlotErrors(errors, no.info=no.info) 
+#替代这个错误率绘图#######################################
+library(ggplot2)
+min_error_index <- which.min(errors)  # 最小误差的索引
+min_error <- min(errors, na.rm = TRUE)  # 最小误差值
+
+# 创建数据框用于绘图
+error_df <- data.frame(
+  Number_of_Features = 1:length(errors),
+  Error = errors
+)
+
+# 绘制错误率图形
+ggplot(error_df, aes(x = Number_of_Features, y = Error)) +
+  geom_line(color = "#88D2A1", size = 0.5) +  # 设置折线图的颜色为 #88D2A1，宽度为 0.5
+  geom_point(aes(x = which.min(errors), y = min(errors)), color = "#4DBBD5", size = 2) +  # 最小误差点的颜色为 #4DBBD5
+  annotate("text", x = min_error_index, y = min_error, 
+           label = sprintf("%.5f", min_error), color = "black", size = 3, hjust = -0.2) +  # 红色字体，字体大小为 3
+   labs(title = " ", 
+       x = "Number of Features", y = "5x CV Error") +
+  theme_minimal() +  # 使用简洁主题
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 12),
+  )
+class(10)  # 检查数值类型
+
+
+
+#绘制准确率图形  
+Plotaccuracy(1-errors,no.info=no.info) 
+###################################
+# 计算准确率
+accuracy <- 1 - errors
+
+# 创建数据框用于绘图
+accuracy_df <- data.frame(
+  Number_of_Features = 1:length(errors),
+  Accuracy = accuracy
+)
+
+# 使用 ggplot2 绘制准确率图形
+library(ggplot2)
+
+ggplot(accuracy_df, aes(x = Number_of_Features, y = Accuracy)) +
+  geom_line(color = "#88D2A1", size = 0.5) +  # 设置折线图的颜色为 #88D2A1，宽度为 0.5
+  geom_point(aes(x = which.min(errors), y = 1 - min(errors)), color = "#4DBBD5", size = 2) +  # 最小误差点的颜色为 #4DBBD5，调整为准确率
+  geom_text(aes(x = which.min(errors), y = 1 - min(errors), 
+                label = sprintf("%.5f", 1 - min(errors))), 
+            color = "black", size = 3, hjust = -0.2) +  # 红色字体，字体大小为 3
+  labs(title = " ", 
+       x = "Number of Features", y = "Accuracy") +  # 添加标题和坐标轴标签
+  theme_minimal() +  # 使用简洁主题
+  theme(
+    axis.text.x = element_text(size = 10),  # 设置 x 轴字体大小
+    axis.text.y = element_text(size = 10),  # 设置 y 轴字体大小
+    plot.title = element_text(size = 12),  # 设置标题字体大小
+  )
+
+
+# 图中红色圆圈所在的位置，即错误率最低点
+which.min(errors)
+
+##保存核心基因集
+top<-top.features[1:which.min(errors), "FeatureName"]
+
+write.csv(top,"筛选的核心基因1111.csv")
+
+
+
